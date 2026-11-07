@@ -12,9 +12,40 @@ from pytest_mock import MockerFixture
 import albumentations as A
 
 
+@pytest.mark.parametrize("fit_mode", ["cover", "contain"])
+@pytest.mark.parametrize(
+    "bad_alias",
+    [
+        None,
+        np.zeros((5, 7), dtype=np.float64),
+        np.zeros((5, 7), dtype=np.int16),
+        np.zeros((5, 7), dtype=np.float32),
+        np.zeros((4, 7), dtype=np.float16),
+        np.zeros((5, 7, 2), dtype=np.float16),
+        np.zeros((5, 7, 0), dtype=np.float16),
+        np.zeros((1, 5, 7, 1), dtype=np.float16),
+    ],
+)
+def test_mosaic_float16_alias_validation(fit_mode: Literal["cover", "contain"], bad_alias: Any) -> None:
+    primary = _paired_item(0, np.uint8, "hw")
+    primary["thermal"] = primary["thermal"].astype(np.float16) / np.float16(256)
+    item = deepcopy(primary)
+    item["thermal"] = bad_alias
+    with pytest.raises(ValueError, match="donor 0 target 'thermal'"):
+        _pipeline((1, 1), fit_mode, {"thermal": "image"})(**primary, mosaic_metadata=[item])
+
+
+@pytest.mark.parametrize("dtype", [np.float64, np.int16, np.uint16])
+def test_mosaic_rejects_unsupported_primary_alias_dtype(dtype: Any) -> None:
+    item = _paired_item(0, np.uint8, "hw")
+    item["thermal"] = item["thermal"].astype(dtype)
+    with pytest.raises(ValueError, match=r"target 'thermal'.*dtype"):
+        _pipeline((1, 1), "cover", {"thermal": "image"})(**item, mosaic_metadata=[])
+
+
 def _paired_item(
     donor_id: int,
-    dtype: type[np.uint8] | type[np.float32],
+    dtype: type[np.uint8] | type[np.float16] | type[np.float32],
     thermal_layout: Literal["hw", "hwc1", "hwc3"],
 ) -> dict[str, np.ndarray]:
     coordinates = np.arange(35, dtype=np.uint8).reshape(5, 7)
@@ -32,8 +63,8 @@ def _paired_item(
     elif thermal_layout == "hwc3":
         thermal = np.stack((thermal, thermal - 20, thermal - 40), axis=-1)
     item = {"image": image.astype(dtype), "thermal": thermal.astype(dtype)}
-    if dtype is np.float32:
-        item = {name: value / np.float32(256) for name, value in item.items()}
+    if dtype in (np.float16, np.float32):
+        item = {name: value / dtype(256) for name, value in item.items()}
     return item
 
 
@@ -124,10 +155,10 @@ def test_mosaic_semantic_alias_paired_donors(fit_mode: Literal["cover", "contain
     _assert_unchanged(items, originals)
 
 
-@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32], ids=["uint8", "float16", "float32"])
 @pytest.mark.parametrize("thermal_layout", ["hw", "hwc1", "hwc3"])
 def test_mosaic_identity_preserves_additional_image(
-    dtype: type[np.uint8] | type[np.float32],
+    dtype: type[np.uint8] | type[np.float16] | type[np.float32],
     thermal_layout: Literal["hw", "hwc1", "hwc3"],
 ) -> None:
     item = _paired_item(0, dtype, thermal_layout)
@@ -146,11 +177,11 @@ def test_mosaic_identity_preserves_additional_image(
     )
 
 
-@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32], ids=["uint8", "float16", "float32"])
 @pytest.mark.parametrize("thermal_layout", ["hw", "hwc1", "hwc3"])
 @pytest.mark.parametrize("fit_mode", ["cover", "contain"])
 def test_mosaic_additional_image_uses_paired_donors(
-    dtype: type[np.uint8] | type[np.float32],
+    dtype: type[np.uint8] | type[np.float16] | type[np.float32],
     thermal_layout: Literal["hw", "hwc1", "hwc3"],
     fit_mode: Literal["cover", "contain"],
 ) -> None:
@@ -173,10 +204,10 @@ def test_mosaic_additional_image_uses_paired_donors(
         )
 
 
-@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32], ids=["uint8", "float16", "float32"])
 @pytest.mark.parametrize("fit_mode", ["cover", "contain"])
 def test_mosaic_canonical_rgb_preserves_donor_tiles(
-    dtype: type[np.uint8] | type[np.float32],
+    dtype: type[np.uint8] | type[np.float16] | type[np.float32],
     fit_mode: Literal["cover", "contain"],
 ) -> None:
     items = [{"image": _paired_item(index, dtype, "hw")["image"]} for index in range(4)]
@@ -187,10 +218,10 @@ def test_mosaic_canonical_rgb_preserves_donor_tiles(
     _rgb_placements(result["image"], originals)
 
 
-@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32], ids=["uint8", "float16", "float32"])
 @pytest.mark.parametrize("fit_mode", ["cover", "contain"])
 def test_mosaic_packed_rgb_thermal_preserves_paired_tiles(
-    dtype: type[np.uint8] | type[np.float32],
+    dtype: type[np.uint8] | type[np.float16] | type[np.float32],
     fit_mode: Literal["cover", "contain"],
 ) -> None:
     items = [_paired_item(index, dtype, "hw") for index in range(4)]
@@ -207,11 +238,15 @@ def test_mosaic_packed_rgb_thermal_preserves_paired_tiles(
 
 
 @pytest.mark.parametrize("donor_count", [0, 1, 3, 5])
-def test_mosaic_multiple_aliases_share_donor_selection(donor_count: int) -> None:
+@pytest.mark.parametrize("fit_mode", ["cover", "contain"])
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_mosaic_multiple_aliases_share_donor_selection(
+    donor_count: int, fit_mode: Literal["cover", "contain"], dtype: Any
+) -> None:
     items = [_paired_item(index, np.uint8, "hw") for index in range(donor_count + 1)]
     for item in items:
-        item["infrared"] = item["thermal"].astype(np.float32)[..., None] / 256
-    result = _pipeline((2, 2), "cover", {"thermal": "image", "infrared": "image"})(
+        item["infrared"] = item["thermal"].astype(dtype)[..., None] / dtype(256)
+    result = _pipeline((2, 2), fit_mode, {"thermal": "image", "infrared": "image"})(
         **items[0], mosaic_metadata=items[1:]
     )
     selected = []
@@ -228,9 +263,10 @@ def test_mosaic_multiple_aliases_share_donor_selection(donor_count: int) -> None
 
 
 @pytest.mark.parametrize("fit_mode", ["cover", "contain"])
-def test_mosaic_alias_uses_resize_crop_and_padding(fit_mode: Literal["cover", "contain"]) -> None:
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_mosaic_alias_uses_resize_crop_and_padding(fit_mode: Literal["cover", "contain"], dtype: Any) -> None:
     pattern = np.array([[11, 12, 13, 14], [21, 22, 23, 24]], dtype=np.uint8)
-    thermal = (255 - pattern).astype(np.float32) / 256
+    thermal = (255 - pattern).astype(dtype) / dtype(256)
     transform = A.Compose(
         [
             A.Mosaic(
@@ -250,17 +286,19 @@ def test_mosaic_alias_uses_resize_crop_and_padding(fit_mode: Literal["cover", "c
     if fit_mode == "cover":
         expected = np.repeat(np.repeat(thermal, 2, axis=0), 2, axis=1)[:, :4]
     else:
-        expected = np.zeros((4, 4), dtype=np.float32)
+        expected = np.zeros((4, 4), dtype=dtype)
         expected[1:3] = thermal
-    np.testing.assert_array_equal(result["thermal"], expected)
+    np.testing.assert_array_equal(result["thermal"], expected, strict=True)
+    assert np.isfinite(result["thermal"]).all()
     assert result["image"].dtype == np.uint8
 
 
-def test_mosaic_alias_linear_resize_matches_known_bilinear_values() -> None:
-    thermal = np.array([[0, 1], [1, 0]], dtype=np.float32)
+@pytest.mark.parametrize("dtype", [np.float16, np.float32])
+def test_mosaic_alias_linear_resize_matches_known_bilinear_values(dtype: Any) -> None:
+    thermal = np.array([[0, 1], [1, 0]], dtype=dtype)
     expected = np.array(
         [[0, 0.25, 0.75, 1], [0.25, 0.375, 0.625, 0.75], [0.75, 0.625, 0.375, 0.25], [1, 0.75, 0.25, 0]],
-        dtype=np.float32,
+        dtype=dtype,
     )
     transform = A.Compose(
         [A.Mosaic(grid_yx=(1, 1), cell_shape=(4, 4), target_size=(4, 4), p=1)],
@@ -268,14 +306,16 @@ def test_mosaic_alias_linear_resize_matches_known_bilinear_values() -> None:
         seed=137,
     )
     result = transform(image=np.zeros((2, 2, 3), dtype=np.uint8), thermal=thermal, mosaic_metadata=[])
-    np.testing.assert_allclose(result["thermal"], expected, atol=1e-7, rtol=0)
+    np.testing.assert_array_equal(result["thermal"], expected, strict=True)
 
 
 @pytest.mark.parametrize("fit_mode", ["cover", "contain"])
 @pytest.mark.parametrize("channels", [4, 5])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32])
 def test_mosaic_alias_variable_donor_sizes_and_multichannel_padding(
     fit_mode: Literal["cover", "contain"],
     channels: int,
+    dtype: Any,
 ) -> None:
     items = []
     for index, shape in enumerate(((5, 7), (10, 14), (3, 7), (5, 14))):
@@ -286,6 +326,8 @@ def test_mosaic_alias_variable_donor_sizes_and_multichannel_padding(
                 "thermal": np.repeat((pattern + 128)[..., None], channels, axis=-1),
             }
         )
+        if dtype is not np.uint8:
+            items[-1]["thermal"] = items[-1]["thermal"].astype(dtype) / dtype(256)
     transform = A.Compose(
         [A.Mosaic(cell_shape=(5, 7), target_size=(7, 9), fit_mode=fit_mode, interpolation=cv2.INTER_NEAREST, p=1)],
         additional_targets={"thermal": "image"},
@@ -295,17 +337,19 @@ def test_mosaic_alias_variable_donor_sizes_and_multichannel_padding(
     result = transform(**items[0], mosaic_metadata=items[1:])
     rgb = result["image"][..., 0]
     expected = np.where(rgb > 0, rgb + 128, 0).astype(np.uint8)
-    np.testing.assert_array_equal(result["thermal"], np.repeat(expected[..., None], channels, axis=-1))
+    if dtype is not np.uint8:
+        expected = expected.astype(dtype) / dtype(256)
+    np.testing.assert_array_equal(result["thermal"], np.repeat(expected[..., None], channels, axis=-1), strict=True)
 
 
-@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32], ids=["uint8", "float16", "float32"])
 @pytest.mark.parametrize("fit_mode", ["cover", "contain"])
 def test_mosaic_alias_resize_supports_128_channels(
-    dtype: type[np.uint8] | type[np.float32],
+    dtype: type[np.uint8] | type[np.float16] | type[np.float32],
     fit_mode: Literal["cover", "contain"],
 ) -> None:
     channels = np.arange(128, dtype=dtype)
-    if dtype is np.float32:
+    if dtype in (np.float16, np.float32):
         channels /= np.float32(128)
     thermal = np.broadcast_to(channels, (2, 2, 128)).copy()
     transform = A.Compose(
@@ -320,15 +364,15 @@ def test_mosaic_alias_resize_supports_128_channels(
     np.testing.assert_array_equal(result["thermal"], np.broadcast_to(channels, (4, 4, 128)))
 
 
-@pytest.mark.parametrize("dtype", [np.uint8, np.float32], ids=["uint8", "float32"])
+@pytest.mark.parametrize("dtype", [np.uint8, np.float16, np.float32], ids=["uint8", "float16", "float32"])
 @pytest.mark.parametrize("fit_mode", ["cover", "contain"])
 def test_mosaic_alias_rejects_129_channels_before_geometry(
-    dtype: type[np.uint8] | type[np.float32],
+    dtype: type[np.uint8] | type[np.float16] | type[np.float32],
     fit_mode: Literal["cover", "contain"],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     channels = np.arange(129, dtype=dtype)
-    if dtype is np.float32:
+    if dtype in (np.float16, np.float32):
         channels /= np.float32(129)
     mosaic = A.Mosaic(grid_yx=(1, 1), cell_shape=(4, 4), target_size=(4, 4), fit_mode=fit_mode, p=1)
     transform = A.Compose([mosaic], additional_targets={"thermal": "image"}, seed=137)

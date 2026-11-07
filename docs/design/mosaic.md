@@ -109,7 +109,7 @@ dtype and channels. The public HW/HWC1 representation is restored by the usual i
 Before sampling geometry or selecting surplus donors, Mosaic validates every canonical-valid donor
 for each active image alias. The donor alias must be a non-empty HW/HWC NumPy array, have the same
 H/W as that donor's image, and match the primary alias's dtype and channel count. HW and HWC1 are
-compatible. Supported alias dtypes are uint8 and float32; the canonical image and aliases may have
+compatible. Supported alias dtypes are uint8, float16 and float32; the canonical image and aliases may have
 different dtypes. Tuple fill must match every active image target's channels; scalar fill is shared.
 Active image aliases with more than 128 channels are rejected before geometry and donor selection,
 including when no resize would be needed. This bound avoids the OpenCV failure in the cell resize
@@ -157,7 +157,7 @@ every canonical-valid donor, including surplus candidates and donors unused by a
   Use scalar fill for mixed channel counts. Instance-stack fill policy is unchanged.
 
 Masks use `mask_interpolation` and `fill_mask` through the canonical mask geometry path.
-They inherit its dtype/interpolation support, without the image-alias uint8/float32 restriction.
+They inherit its dtype/interpolation support, without the image-alias uint8/float16/float32 restriction.
 For example, uint16/int16 masks retain labels above 255 or below zero; int32 nearest resize works,
 while int32 linear resize retains the canonical OpenCV rejection. This adds no dtype conversion
 or support for combinations that the canonical mask operation rejects.
